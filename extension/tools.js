@@ -2,6 +2,7 @@
 
 import { ensureTabGroup, formatTabContext, isInGroup, getTabGroupId } from './tabs.js';
 import { cdp, takeScreenshot, dispatchMouse, mouseClick, humanType, sleep, getScreenshotStore, ensureAttached, ensureDomain } from './cdp.js';
+import { advancedToolHandlers } from './tools-advanced.js';
 
 export const consoleMessages = new Map(); // tabId -> [msgs]
 export const networkRequests = new Map(); // tabId -> [reqs]
@@ -277,8 +278,6 @@ async function upload_image(args) {
 }
 
 // --- Export (merge core + advanced) ---
-
-import { advancedToolHandlers } from './tools-advanced.js';
 
 export const toolHandlers = {
   tabs_context_mcp,

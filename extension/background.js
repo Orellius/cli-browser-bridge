@@ -2,8 +2,7 @@
 // Handles native messaging, CDP events, tool dispatch, popup status.
 
 import { toolHandlers, consoleMessages, networkRequests } from './tools.js';
-import { ensureDomain, ensureAttached } from './cdp.js';
-import { recoverTabGroupState } from './tabs.js';
+import { recoverTabGroupState, getTabGroupTabs, getTabGroupId } from './tabs.js';
 
 self.addEventListener("unhandledrejection", (e) => e.preventDefault());
 
@@ -135,16 +134,13 @@ async function handleToolRequest(id, tool, args) {
 // --- Popup status ---
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "getStatus") {
-    // Dynamic import to avoid circular deps
-    import('./tabs.js').then(({ getTabGroupTabs, getTabGroupId }) => {
-      sendResponse({
-        connected: nativePort !== null,
-        tabGroupId: getTabGroupId(),
-        tabCount: getTabGroupTabs().size,
-        lastMessageTimestamp,
-      });
+    sendResponse({
+      connected: nativePort !== null,
+      tabGroupId: getTabGroupId(),
+      tabCount: getTabGroupTabs().size,
+      lastMessageTimestamp,
     });
-    return true;
+    return false;
   }
   if (msg.type === "reconnect") {
     if (nativePort) {
