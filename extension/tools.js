@@ -1,302 +1,296 @@
-// Tool handlers for cli-browser-bridge — MV3 service worker
+// Tool handlers for cli-browser-bridge — aligned with MCP tool schemas
 
 import { ensureTabGroup, formatTabContext, isInGroup, getTabGroupId } from './tabs.js';
 import { cdp, takeScreenshot, dispatchMouse, mouseClick, humanType, sleep, getScreenshotStore, ensureAttached, ensureDomain } from './cdp.js';
 import { advancedToolHandlers } from './tools-advanced.js';
 
-export const consoleMessages = new Map(); // tabId -> [msgs]
-export const networkRequests = new Map(); // tabId -> [reqs]
+export const consoleMessages = new Map();
+export const networkRequests = new Map();
 
-// --- Helpers ---
+function text(t) { return { content: [{ type: 'text', text: String(t) }] }; }
+function err(t) { return { content: [{ type: 'text', text: t }], isError: true }; }
 
 async function sendContentMessage(tabId, message) {
-  try {
-    return await chrome.tabs.sendMessage(tabId, message);
-  } catch {
+  try { return await chrome.tabs.sendMessage(tabId, message); } catch {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
     return chrome.tabs.sendMessage(tabId, message);
   }
 }
 
-async function resolveRefToCoordinates(tabId, ref) {
+async function resolveRef(tabId, ref) {
   const resp = await sendContentMessage(tabId, { type: 'getRefCoordinates', ref });
-  if (!resp) throw new Error(`Ref ${ref} not found`);
-  return resp;
-}
-
-function parseModifierString(modStr = '') {
-  let mod = 0;
-  if (modStr.includes('Alt')) mod |= 1;
-  if (modStr.includes('Ctrl') || modStr.includes('Control')) mod |= 2;
-  if (modStr.includes('Meta') || modStr.includes('Command')) mod |= 4;
-  if (modStr.includes('Shift')) mod |= 8;
-  return mod;
+  if (resp?.result) return [resp.result.x, resp.result.y];
+  return null;
 }
 
 function parseKeyCombo(keyStr) {
-  const parts = keyStr.split('+');
-  const key = parts.pop();
-  const modifiers = parseModifierString(parts.join('+'));
+  const MAP = { enter:'Enter',return:'Enter',tab:'Tab',escape:'Escape',esc:'Escape',backspace:'Backspace',delete:'Delete',space:'Space',' ':'Space',arrowup:'ArrowUp',arrowdown:'ArrowDown',arrowleft:'ArrowLeft',arrowright:'ArrowRight',up:'ArrowUp',down:'ArrowDown',left:'ArrowLeft',right:'ArrowRight',home:'Home',end:'End',pageup:'PageUp',pagedown:'PageDown' };
+  const parts = keyStr.split('+').map(p => p.trim().toLowerCase());
+  let modifiers = 0, key = '';
+  for (const p of parts) {
+    if (p === 'ctrl' || p === 'control') modifiers |= 2;
+    else if (p === 'alt') modifiers |= 1;
+    else if (p === 'shift') modifiers |= 8;
+    else if (p === 'meta' || p === 'cmd' || p === 'command') modifiers |= 4;
+    else key = MAP[p] || p;
+  }
   return { key, modifiers };
 }
 
-function text(str) {
-  return { content: [{ type: 'text', text: str }] };
+function parseModifiers(str) {
+  if (!str) return 0;
+  let m = 0;
+  for (const p of str.split('+').map(s => s.trim().toLowerCase())) {
+    if (p === 'ctrl' || p === 'control') m |= 2;
+    else if (p === 'alt') m |= 1;
+    else if (p === 'shift') m |= 8;
+    else if (p === 'meta' || p === 'cmd' || p === 'command') m |= 4;
+  }
+  return m;
 }
 
-// --- Handlers ---
+// --- Core handlers ---
 
-async function tabs_context_mcp() {
-  await ensureTabGroup();
+async function tabs_context_mcp(args) {
+  await ensureTabGroup(args.createIfEmpty);
   const groupId = getTabGroupId();
-  const tabs = groupId !== null
-    ? await chrome.tabs.query({ groupId })
-    : await chrome.tabs.query({ currentWindow: true });
+  if (groupId === null) return text('No MCP tab group. Use createIfEmpty: true.');
+  const tabs = await chrome.tabs.query({ groupId });
   return formatTabContext(tabs);
 }
 
-async function tabs_create_mcp(args) {
+async function tabs_create_mcp() {
   await ensureTabGroup(true);
   const groupId = getTabGroupId();
-  const tab = await chrome.tabs.create({ url: args.url || 'about:blank', active: false });
+  const tab = await chrome.tabs.create({ active: true });
   if (groupId !== null) await chrome.tabs.group({ tabIds: [tab.id], groupId });
-  return text(`Created tab ${tab.id}`);
+  const tabs = await chrome.tabs.query({ groupId });
+  const ctx = formatTabContext(tabs);
+  ctx.content[0].text = `Created tab ${tab.id}\n\n` + ctx.content[0].text;
+  return ctx;
 }
 
 async function navigate(args) {
   const { tabId, url } = args;
-  if (!(await isInGroup(tabId))) return text('Error: tab not in MCP group');
-
-  if (url === 'back') {
-    await chrome.tabs.goBack(tabId);
-  } else if (url === 'forward') {
-    await chrome.tabs.goForward(tabId);
-  } else {
-    await chrome.tabs.update(tabId, { url });
-  }
-
-  // Wait for load (10s max)
-  await new Promise((resolve) => {
-    const timeout = setTimeout(resolve, 10000);
-    function onUpdated(id, info) {
-      if (id === tabId && info.status === 'complete') {
-        chrome.tabs.onUpdated.removeListener(onUpdated);
-        clearTimeout(timeout);
-        resolve();
-      }
+  if (!(await isInGroup(tabId))) return err(`Tab ${tabId} not in MCP group.`);
+  if (url === 'back') await chrome.tabs.goBack(tabId);
+  else if (url === 'forward') await chrome.tabs.goForward(tabId);
+  else {
+    let target = url;
+    if (!target.match(/^https?:\/\//i) && !target.startsWith('about:')) {
+      target = target.replace(/^[a-z]{1,5}:\/+/i, '');
+      target = 'https://' + target;
     }
-    chrome.tabs.onUpdated.addListener(onUpdated);
+    await chrome.tabs.update(tabId, { url: target });
+  }
+  await new Promise(resolve => {
+    const t = setTimeout(resolve, 10000);
+    const fn = (id, info) => { if (id === tabId && info.status === 'complete') { chrome.tabs.onUpdated.removeListener(fn); clearTimeout(t); resolve(); } };
+    chrome.tabs.onUpdated.addListener(fn);
   });
-
   const tab = await chrome.tabs.get(tabId);
-  return text(`Navigated to ${tab.url}`);
+  return text(`Navigated to ${tab.url}${tab.status !== 'complete' ? ' (still loading)' : ''}`);
 }
 
 async function computer(args) {
   const { tabId, action } = args;
+  const coord = args.coordinate;
+  const modifiers = parseModifiers(args.modifiers);
 
-  if (action === 'screenshot') {
-    const { base64, imageId } = await takeScreenshot(tabId);
-    return { content: [{ type: 'image', data: base64, mimeType: 'image/jpeg', imageId }] };
+  let cx = coord?.[0], cy = coord?.[1];
+  if (args.ref && !coord) {
+    const resolved = await resolveRef(tabId, args.ref);
+    if (!resolved) return err(`Could not resolve ref "${args.ref}"`);
+    [cx, cy] = resolved;
   }
 
-  if (['left_click', 'right_click', 'double_click', 'triple_click'].includes(action)) {
-    let x = args.x, y = args.y;
-    if (args.ref) ({ x, y } = await resolveRefToCoordinates(tabId, args.ref));
-    const opts = {
-      button: action === 'right_click' ? 'right' : 'left',
-      clickCount: action === 'double_click' ? 2 : action === 'triple_click' ? 3 : 1,
-    };
-    await mouseClick(tabId, x, y, opts);
-    return text(`Clicked (${x}, ${y})`);
-  }
-
-  if (action === 'hover') {
-    let x = args.x, y = args.y;
-    if (args.ref) ({ x, y } = await resolveRefToCoordinates(tabId, args.ref));
-    await dispatchMouse(tabId, 'mouseMoved', x, y);
-    return text(`Hovered (${x}, ${y})`);
-  }
-
-  if (action === 'type') {
-    if (args.humanlike) {
-      await humanType(tabId, args.text);
-    } else {
-      for (const ch of args.text) {
-        await cdp(tabId, 'Input.insertText', { text: ch });
-        await sleep(10);
+  switch (action) {
+    case 'screenshot': {
+      const { base64, imageId } = await takeScreenshot(tabId);
+      let dims = '';
+      try { const vp = await cdp(tabId, 'Runtime.evaluate', { expression: 'window.innerWidth+"x"+window.innerHeight' }); dims = vp?.result?.value || ''; } catch {}
+      return { content: [{ type: 'text', text: `Screenshot (${dims}) ID: ${imageId}` }, { type: 'image', data: base64, mimeType: 'image/jpeg' }] };
+    }
+    case 'left_click': case 'right_click': case 'double_click': case 'triple_click': {
+      if (cx == null) return err('coordinate or ref required');
+      const btn = action === 'right_click' ? 'right' : 'left';
+      const cc = action === 'double_click' ? 2 : action === 'triple_click' ? 3 : 1;
+      await mouseClick(tabId, cx, cy, { button: btn, clickCount: cc, modifiers });
+      return text(`Clicked (${cx}, ${cy})`);
+    }
+    case 'hover': {
+      if (cx == null) return err('coordinate or ref required');
+      await dispatchMouse(tabId, 'mouseMoved', cx, cy, { modifiers });
+      await sleep(200);
+      return text(`Hovered (${cx}, ${cy})`);
+    }
+    case 'type': {
+      if (!args.text) return err('text required');
+      if (args.humanlike) { await humanType(tabId, args.text); }
+      else { for (const ch of args.text) { await cdp(tabId, 'Input.insertText', { text: ch }); await sleep(10); } }
+      return text(`Typed "${args.text.substring(0, 50)}${args.text.length > 50 ? '...' : ''}"`);
+    }
+    case 'key': {
+      if (!args.text) return err('text required for key action');
+      const repeat = Math.min(args.repeat || 1, 100);
+      const keys = args.text.split(' ').filter(Boolean);
+      for (let r = 0; r < repeat; r++) {
+        for (const k of keys) {
+          const { key, modifiers: km } = parseKeyCombo(k);
+          await cdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key, modifiers: km });
+          await cdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key, modifiers: km });
+          await sleep(30);
+        }
       }
+      return text(`Key: ${args.text} x${repeat}`);
     }
-    return text(`Typed ${args.text.length} chars`);
-  }
-
-  if (action === 'key') {
-    const { key, modifiers } = parseKeyCombo(args.key);
-    const repeat = args.repeat ?? 1;
-    for (let i = 0; i < repeat; i++) {
-      await cdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key, modifiers });
-      await cdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key, modifiers });
+    case 'scroll': {
+      if (cx == null) return err('coordinate required for scroll');
+      const dir = args.scroll_direction || 'down';
+      const amt = Math.min(args.scroll_amount || 3, 10);
+      const dX = dir === 'left' ? -amt * 100 : dir === 'right' ? amt * 100 : 0;
+      const dY = dir === 'up' ? -amt * 100 : dir === 'down' ? amt * 100 : 0;
+      await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x: cx, y: cy, deltaX: dX, deltaY: dY, modifiers });
+      await sleep(300);
+      const { base64 } = await takeScreenshot(tabId);
+      return { content: [{ type: 'text', text: `Scrolled ${dir} ${amt} ticks` }, { type: 'image', data: base64, mimeType: 'image/jpeg' }] };
     }
-    return text(`Key: ${args.key} x${repeat}`);
-  }
-
-  if (action === 'scroll') {
-    await cdp(tabId, 'Input.dispatchMouseEvent', {
-      type: 'mouseWheel', x: args.x, y: args.y,
-      deltaX: args.deltaX ?? 0, deltaY: args.deltaY ?? 300,
-    });
-    const { base64, imageId } = await takeScreenshot(tabId);
-    return { content: [{ type: 'image', data: base64, mimeType: 'image/jpeg', imageId }] };
-  }
-
-  if (action === 'scroll_to') {
-    if (args.ref) {
-      await sendContentMessage(tabId, { type: 'scrollToRef', ref: args.ref });
-    } else {
-      await cdp(tabId, 'Runtime.evaluate', { expression: `window.scrollTo(${args.x ?? 0}, ${args.y ?? 0})` });
+    case 'scroll_to': {
+      if (args.ref) await sendContentMessage(tabId, { type: 'scrollToRef', ref: args.ref });
+      else if (coord) await cdp(tabId, 'Runtime.evaluate', { expression: `window.scrollTo(${cx},${cy})` });
+      await sleep(300);
+      return text('Scrolled to target');
     }
-    return text('Scrolled');
-  }
-
-  if (action === 'wait') {
-    await sleep((args.duration ?? 1) * 1000);
-    return text(`Waited ${args.duration ?? 1}s`);
-  }
-
-  if (action === 'left_click_drag') {
-    const { startX, startY, endX, endY } = args;
-    await dispatchMouse(tabId, 'mousePressed', startX, startY);
-    const steps = 10;
-    for (let i = 1; i <= steps; i++) {
-      const x = Math.round(startX + (endX - startX) * (i / steps));
-      const y = Math.round(startY + (endY - startY) * (i / steps));
-      await dispatchMouse(tabId, 'mouseMoved', x, y);
-      await sleep(20);
+    case 'wait': {
+      const dur = Math.min(args.duration || 1, 30);
+      await sleep(dur * 1000);
+      return text(`Waited ${dur}s`);
     }
-    await dispatchMouse(tabId, 'mouseReleased', endX, endY);
-    return text(`Dragged (${startX},${startY}) → (${endX},${endY})`);
+    case 'left_click_drag': {
+      const sc = args.start_coordinate;
+      if (!sc || !coord) return err('start_coordinate and coordinate required');
+      const [sx, sy] = sc;
+      await dispatchMouse(tabId, 'mouseMoved', sx, sy, { modifiers });
+      await sleep(50);
+      await dispatchMouse(tabId, 'mousePressed', sx, sy, { button: 'left', modifiers });
+      for (let i = 1; i <= 10; i++) {
+        await dispatchMouse(tabId, 'mouseMoved', sx + (cx - sx) * i / 10, sy + (cy - sy) * i / 10, { modifiers });
+        await sleep(20);
+      }
+      await dispatchMouse(tabId, 'mouseReleased', cx, cy, { button: 'left', modifiers });
+      return text(`Dragged (${sx},${sy}) → (${cx},${cy})`);
+    }
+    case 'zoom': {
+      if (!args.region) return err('region required for zoom');
+      const { base64 } = await takeScreenshot(tabId);
+      return { content: [{ type: 'text', text: `Zoom region: [${args.region}]` }, { type: 'image', data: base64, mimeType: 'image/jpeg' }] };
+    }
+    default: return err(`Unknown action: ${action}`);
   }
-
-  if (action === 'zoom') {
-    const { base64, imageId } = await takeScreenshot(tabId);
-    const regionInfo = args.region ? ` region=${JSON.stringify(args.region)}` : '';
-    return { content: [{ type: 'image', data: base64, mimeType: 'image/jpeg', imageId }, { type: 'text', text: regionInfo }] };
-  }
-
-  return text(`Unknown action: ${action}`);
 }
 
 async function find(args) {
-  const { tabId, query, pierceShadow } = args;
-  const resp = await sendContentMessage(tabId, { type: 'findElements', query, pierceShadow: pierceShadow ?? true });
-  return text(JSON.stringify(resp?.result ?? []));
+  if (!(await isInGroup(args.tabId))) return err('Tab not in MCP group.');
+  const resp = await sendContentMessage(args.tabId, { type: 'findElements', query: args.query, pierceShadow: args.pierceShadow ?? true });
+  const results = resp?.result || [];
+  if (!results.length) return text(`No elements found for "${args.query}"`);
+  let t = `Found ${results.length} element(s):\n`;
+  for (const r of results) t += `[${r.ref}] ${r.role} "${r.name}" at (${r.coordinates[0]}, ${r.coordinates[1]})\n`;
+  return text(t);
 }
 
 async function form_input(args) {
-  const { tabId, ref, value } = args;
-  const resp = await sendContentMessage(tabId, { type: 'setFormValue', ref, value });
-  return text(JSON.stringify(resp?.result ?? {}));
+  if (!(await isInGroup(args.tabId))) return err('Tab not in MCP group.');
+  const resp = await sendContentMessage(args.tabId, { type: 'setFormValue', ref: args.ref, value: args.value });
+  return text(resp?.result?.error ? `Error: ${resp.result.error}` : `Set ${args.ref} to "${args.value}"`);
 }
 
 async function get_page_text(args) {
+  if (!(await isInGroup(args.tabId))) return err('Tab not in MCP group.');
   const resp = await sendContentMessage(args.tabId, { type: 'getPageText' });
-  return text(resp?.result ?? '');
+  if (!resp?.result) return err('Could not extract text');
+  try {
+    const data = JSON.parse(resp.result);
+    return text(`Title: ${data.title}\nURL: ${data.url}\n\n${data.text}`);
+  } catch { return text(resp.result); }
 }
 
 async function read_page(args) {
-  const { tabId, filter, depth, pierceShadow } = args;
-  const resp = await sendContentMessage(tabId, {
+  if (!(await isInGroup(args.tabId))) return err('Tab not in MCP group.');
+  const resp = await sendContentMessage(args.tabId, {
     type: 'generateAccessibilityTree',
-    options: { filter: filter ?? 'all', depth, pierceShadow: pierceShadow ?? true },
+    options: { filter: args.filter, depth: args.depth, max_chars: args.max_chars, ref_id: args.ref_id, pierceShadow: args.pierceShadow ?? true },
   });
-  const tab = await chrome.tabs.get(tabId);
-  const dims = `\nViewport: ${tab.width ?? '?'}x${tab.height ?? '?'}`;
-  return text((resp?.result ?? '') + dims);
+  let tree = resp?.result || 'Error: could not generate tree';
+  try { await ensureAttached(args.tabId); const vp = await cdp(args.tabId, 'Runtime.evaluate', { expression: 'window.innerWidth+"x"+window.innerHeight' }); if (vp?.result?.value) tree += `\n\nViewport: ${vp.result.value}`; } catch {}
+  return text(tree);
 }
 
 async function javascript_tool(args) {
-  const result = await cdp(args.tabId, 'Runtime.evaluate', {
-    expression: args.code,
-    returnByValue: true,
-    awaitPromise: true,
-  });
-  const val = result?.result?.value;
-  return text(val !== undefined ? JSON.stringify(val) : JSON.stringify(result?.result));
+  if (!(await isInGroup(args.tabId))) return err('Tab not in MCP group.');
+  try {
+    const result = await cdp(args.tabId, 'Runtime.evaluate', { expression: args.text, returnByValue: true, awaitPromise: true });
+    if (result.exceptionDetails) return err(result.exceptionDetails.text || JSON.stringify(result.exceptionDetails));
+    const val = result.result;
+    if (val.type === 'undefined') return text('undefined');
+    return text(val.value !== undefined ? JSON.stringify(val.value) : val.description || String(val));
+  } catch (e) { return err(e.message); }
 }
 
 async function read_console_messages(args) {
-  const { tabId } = args;
-  await ensureDomain(tabId, 'Console');
-  await ensureDomain(tabId, 'Runtime');
-  const msgs = consoleMessages.get(tabId) ?? [];
-  const filtered = args.level ? msgs.filter(m => m.level === args.level) : msgs;
-  return text(JSON.stringify(filtered));
+  await ensureDomain(args.tabId, 'Console');
+  await ensureDomain(args.tabId, 'Runtime');
+  let msgs = consoleMessages.get(args.tabId) || [];
+  if (args.onlyErrors) msgs = msgs.filter(m => ['error', 'exception'].includes(m.level));
+  if (args.pattern) { try { const re = new RegExp(args.pattern, 'i'); msgs = msgs.filter(m => re.test(m.text)); } catch { msgs = msgs.filter(m => m.text.includes(args.pattern)); } }
+  msgs = msgs.slice(-(args.limit || 100));
+  if (args.clear) consoleMessages.set(args.tabId, []);
+  if (!msgs.length) return text('No console messages matching pattern.');
+  return text(msgs.map(m => `[${m.level}] ${m.text}`).join('\n'));
 }
 
 async function read_network_requests(args) {
-  const { tabId } = args;
-  await ensureDomain(tabId, 'Network');
-  const reqs = networkRequests.get(tabId) ?? [];
-  const filtered = args.urlFilter ? reqs.filter(r => r.url?.includes(args.urlFilter)) : reqs;
-  return text(JSON.stringify(filtered));
+  await ensureDomain(args.tabId, 'Network');
+  let reqs = networkRequests.get(args.tabId) || [];
+  if (args.urlPattern) reqs = reqs.filter(r => r.url.includes(args.urlPattern));
+  reqs = reqs.slice(-(args.limit || 100));
+  if (args.clear) networkRequests.set(args.tabId, []);
+  if (!reqs.length) return text('No network requests matching pattern.');
+  return text(reqs.map(r => `${r.method} ${r.url} ${r.status ? `→ ${r.status}` : '(pending)'}`).join('\n'));
 }
 
-async function gif_creator() {
-  return text('not yet implemented');
-}
+async function gif_creator() { return text('GIF recording not yet implemented.'); }
 
 async function resize_window(args) {
-  await chrome.windows.update(args.windowId, { width: args.width, height: args.height });
-  return text(`Resized window ${args.windowId} to ${args.width}x${args.height}`);
+  if (!(await isInGroup(args.tabId))) return err('Tab not in MCP group.');
+  const tab = await chrome.tabs.get(args.tabId);
+  await chrome.windows.update(tab.windowId, { width: args.width, height: args.height });
+  return text(`Resized to ${args.width}x${args.height}`);
 }
 
-async function shortcuts_list() {
-  return text('not supported');
-}
-
-async function shortcuts_execute() {
-  return text('not supported');
-}
-
-async function switch_browser(args) {
-  return text(`To switch browsers, install the extension in ${args.browser ?? 'the target browser'} and connect via the native messaging host.`);
-}
+async function shortcuts_list() { return text('No shortcuts available.'); }
+async function shortcuts_execute() { return text('Shortcuts not supported.'); }
+async function switch_browser() { return text('To switch browsers: disable extension in current browser, enable in target, restart both.'); }
 
 async function update_plan(args) {
-  const plan = args.plan ?? '';
-  const formatted = `Plan updated:\n${plan}`;
-  return text(formatted);
+  let t = `Plan:\nDomains: ${(args.domains || []).join(', ')}\nApproach:\n`;
+  for (const s of (args.approach || [])) t += `- ${s}\n`;
+  t += '\nPlan auto-approved.';
+  return text(t);
 }
 
 async function upload_image(args) {
-  const { imageId } = args;
   const store = getScreenshotStore();
-  if (!imageId || !store.has(imageId)) {
-    return text(`Error: imageId "${imageId}" not found in screenshot store`);
-  }
-  return text(JSON.stringify({ imageId, stored: true }));
+  if (!store.has(args.imageId)) return err(`Image ${args.imageId} not found. Take a screenshot first.`);
+  return text(`Image ${args.imageId} ready for upload. Use ref or coordinate to target.`);
 }
 
-// --- Export (merge core + advanced) ---
+// --- Export ---
 
 export const toolHandlers = {
-  tabs_context_mcp,
-  tabs_create_mcp,
-  navigate,
-  computer,
-  find,
-  form_input,
-  get_page_text,
-  read_page,
-  javascript_tool,
-  read_console_messages,
-  read_network_requests,
-  gif_creator,
-  resize_window,
-  shortcuts_list,
-  shortcuts_execute,
-  switch_browser,
-  update_plan,
-  upload_image,
+  tabs_context_mcp, tabs_create_mcp, navigate, computer, find, form_input,
+  get_page_text, read_page, javascript_tool, read_console_messages,
+  read_network_requests, gif_creator, resize_window, shortcuts_list,
+  shortcuts_execute, switch_browser, update_plan, upload_image,
   ...advancedToolHandlers,
 };
