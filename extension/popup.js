@@ -44,5 +44,16 @@ reconnectBtn.addEventListener("click", () => {
   });
 });
 
+const disconnectBtn = document.getElementById("disconnect");
+disconnectBtn.addEventListener("click", () => {
+  disconnectBtn.textContent = "Disconnecting...";
+  chrome.runtime.sendMessage({ type: "disconnect" }, () => {
+    setTimeout(() => {
+      disconnectBtn.textContent = "Disconnect";
+      update();
+    }, 500);
+  });
+});
+
 update();
 setInterval(update, 2000);

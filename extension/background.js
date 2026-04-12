@@ -151,6 +151,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ ok: true });
     return true;
   }
+  if (msg.type === "disconnect") {
+    if (nativePort) {
+      try { nativePort.disconnect(); } catch {}
+      nativePort = null;
+    }
+    // Clear keepalive so it doesn't auto-reconnect
+    chrome.alarms.clear("keepalive");
+    sendResponse({ ok: true });
+    return true;
+  }
 });
 
 // --- Init ---
