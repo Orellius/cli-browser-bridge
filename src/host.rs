@@ -4,8 +4,8 @@ use crate::native_messaging;
 
 use std::io;
 use std::path::PathBuf;
+use crate::ipc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
@@ -26,7 +26,7 @@ pub async fn run(socket_path: PathBuf) -> Result<()> {
     });
 
     // Main loop: connect to UDS, bridge messages
-    let mut stream = connect_uds(&socket_path).await?;
+    let stream = connect_ipc(&socket_path).await?;
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let writer = std::sync::Arc::new(tokio::sync::Mutex::new(writer));
@@ -40,9 +40,9 @@ pub async fn run(socket_path: PathBuf) -> Result<()> {
                     Ok(0) => {
                         tracing::info!("UDS connection closed, reconnecting...");
                         drop(reader);
-                        match reconnect_uds(&socket_path).await {
+                        match reconnect_ipc(&socket_path).await {
                             Some(new_stream) => {
-                                stream = new_stream;
+                                let stream = new_stream;
                                 let (r, w) = stream.into_split();
                                 reader = BufReader::new(r);
                                 *writer.lock().await = w;
@@ -118,10 +118,10 @@ fn write_native_stdout_blocking(mut rx: mpsc::Receiver<serde_json::Value>) {
     }
 }
 
-/// Connect to the UDS with retries.
-async fn connect_uds(path: &PathBuf) -> Result<UnixStream> {
+/// Connect to the IPC endpoint with retries.
+async fn connect_ipc(path: &PathBuf) -> Result<ipc::IpcStream> {
     for attempt in 0..config::HOST_MAX_RECONNECT_ATTEMPTS {
-        match UnixStream::connect(path).await {
+        match ipc::connect(path).await {
             Ok(stream) => {
                 tracing::info!("connected to serve via UDS");
                 return Ok(stream);
@@ -135,11 +135,10 @@ async fn connect_uds(path: &PathBuf) -> Result<UnixStream> {
     unreachable!()
 }
 
-/// Reconnect to UDS after disconnection. Returns None if max attempts exceeded.
-async fn reconnect_uds(path: &PathBuf) -> Option<UnixStream> {
+async fn reconnect_ipc(path: &PathBuf) -> Option<ipc::IpcStream> {
     for _ in 0..config::HOST_MAX_RECONNECT_ATTEMPTS {
         sleep(Duration::from_millis(config::HOST_RECONNECT_INTERVAL_MS)).await;
-        if let Ok(stream) = UnixStream::connect(path).await {
+        if let Ok(stream) = ipc::connect(path).await {
             tracing::info!("reconnected to serve via UDS");
             return Some(stream);
         }

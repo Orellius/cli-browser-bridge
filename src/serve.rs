@@ -9,8 +9,8 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use crate::ipc::{IpcListener, IpcStream};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::{timeout, Duration};
 
@@ -31,7 +31,7 @@ pub async fn run(socket_path: PathBuf) -> Result<()> {
     lifecycle::cleanup_socket(&socket_path);
     lifecycle::write_pidfile(&pidfile);
 
-    let listener = UnixListener::bind(&socket_path)?;
+    let listener = IpcListener::bind(&socket_path)?;
     tracing::info!("UDS listening on {}", socket_path.display());
 
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
@@ -191,7 +191,7 @@ fn coerce_args(args: &mut Value) {
 }
 
 async fn uds_accept_loop(
-    listener: UnixListener,
+    listener: IpcListener,
     pending: PendingMap,
     mut ext_rx: mpsc::Receiver<String>,
     ext_connected: Arc<Mutex<bool>>,
@@ -200,7 +200,7 @@ async fn uds_accept_loop(
         tokio::select! {
             accept = listener.accept() => {
                 match accept {
-                    Ok((stream, _)) => {
+                    Ok(stream) => {
                         tracing::info!("native host connected");
                         *ext_connected.lock().await = true;
                         handle_uds_connection(stream, &pending, &mut ext_rx, &ext_connected).await;
@@ -220,7 +220,7 @@ async fn uds_accept_loop(
 }
 
 async fn handle_uds_connection(
-    stream: UnixStream,
+    stream: IpcStream,
     pending: &PendingMap,
     ext_rx: &mut mpsc::Receiver<String>,
     _ext_connected: &Arc<Mutex<bool>>,

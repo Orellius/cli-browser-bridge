@@ -2,6 +2,7 @@ mod bridge;
 mod config;
 mod error;
 mod host;
+mod ipc;
 mod lifecycle;
 mod mcp;
 mod native_messaging;
