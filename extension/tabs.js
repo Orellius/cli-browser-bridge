@@ -1,122 +1,124 @@
-// MCP tab group management for cli-browser-bridge.
-// Tracks a single "MCP" tab group across service worker restarts.
+// MCP tab group management — survives service worker restarts.
 
 let tabGroupId = null;
 let tabGroupTabs = new Set();
+let recoveryDone = false;
+let recoveryPromise = null;
 
-// --- Recovery ---
-
-export async function recoverTabGroupState() {
+async function recover() {
   try {
-    const groups = await chrome.tabGroups.query({ title: "MCP" });
-    if (groups.length === 0) return;
-
-    const group = groups[0];
-    tabGroupId = group.id;
-    tabGroupTabs = new Set();
-
-    const tabs = await chrome.tabs.query({ groupId: tabGroupId });
-    for (const tab of tabs) {
-      tabGroupTabs.add(tab.id);
+    const groups = await chrome.tabGroups.query({ title: 'MCP' });
+    if (groups.length > 0) {
+      tabGroupId = groups[0].id;
+      const tabs = await chrome.tabs.query({ groupId: tabGroupId });
+      tabGroupTabs = new Set(tabs.map(t => t.id));
     }
-  } catch {
-    // tabGroups API unavailable or no groups found — stay null
-  }
+  } catch { /* no groups */ }
+  recoveryDone = true;
 }
 
-// --- Group lifecycle ---
+async function waitForRecovery() {
+  if (recoveryDone) return;
+  if (!recoveryPromise) recoveryPromise = recover();
+  await recoveryPromise;
+}
+
+export async function recoverTabGroupState() {
+  await waitForRecovery();
+}
 
 export async function ensureTabGroup(createIfEmpty = false) {
+  await waitForRecovery();
+
+  // Check if cached group still exists
   if (tabGroupId !== null) {
     try {
       await chrome.tabGroups.get(tabGroupId);
-      return; // group still alive
+      const tabs = await chrome.tabs.query({ groupId: tabGroupId });
+      tabGroupTabs = new Set(tabs.map(t => t.id));
+      if (tabGroupTabs.size > 0) return;
     } catch {
       tabGroupId = null;
-      tabGroupTabs = new Set();
+      tabGroupTabs.clear();
     }
   }
 
+  // Re-scan — another tool call or session may have created one
+  try {
+    const groups = await chrome.tabGroups.query({ title: 'MCP' });
+    if (groups.length > 0) {
+      tabGroupId = groups[0].id;
+      const tabs = await chrome.tabs.query({ groupId: tabGroupId });
+      tabGroupTabs = new Set(tabs.map(t => t.id));
+      if (tabGroupTabs.size > 0) return;
+    }
+  } catch { /* ok */ }
+
   if (!createIfEmpty) return;
 
-  const win = await chrome.windows.create({ focused: false });
-  const tab = win.tabs[0];
+  // Create in the current focused window, not a new one
+  const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const windowId = activeTab?.windowId;
+
+  const tab = await chrome.tabs.create({
+    url: 'about:blank',
+    active: false,
+    ...(windowId ? { windowId } : {}),
+  });
 
   const groupId = await chrome.tabs.group({
     tabIds: [tab.id],
-    createProperties: { windowId: win.id },
+    ...(windowId ? { createProperties: { windowId } } : {}),
   });
 
-  await chrome.tabGroups.update(groupId, { title: "MCP", color: "blue" });
+  await chrome.tabGroups.update(groupId, { title: 'MCP', color: 'blue' });
 
   tabGroupId = groupId;
   tabGroupTabs = new Set([tab.id]);
 }
 
-// --- Query helpers ---
-
-export function getTabGroupId() {
-  return tabGroupId;
-}
-
-export function getTabGroupTabs() {
-  return tabGroupTabs;
-}
-
-// --- Tab membership ---
+export function getTabGroupId() { return tabGroupId; }
+export function getTabGroupTabs() { return tabGroupTabs; }
 
 export async function isInGroup(tabId) {
+  await waitForRecovery();
   try {
     const tab = await chrome.tabs.get(tabId);
-
-    if (tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) return false;
+    if (tab.groupId === -1) return false;
 
     if (tabGroupId !== null && tab.groupId === tabGroupId) {
       tabGroupTabs.add(tabId);
       return true;
     }
 
-    // Service worker may have restarted — check group title
+    // Recovery path — check group title
     try {
       const group = await chrome.tabGroups.get(tab.groupId);
-      if (group.title === "MCP") {
+      if (group.title === 'MCP') {
         tabGroupId = group.id;
-        tabGroupTabs.add(tabId);
+        const tabs = await chrome.tabs.query({ groupId: tabGroupId });
+        tabGroupTabs = new Set(tabs.map(t => t.id));
         return true;
       }
-    } catch {
-      // group gone
-    }
+    } catch { /* group gone */ }
 
     return false;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
-// --- Formatting ---
-
 export function formatTabContext(tabs) {
-  const structured = tabs.map((t) => ({
-    id: t.id,
-    title: t.title ?? "",
-    url: t.url ?? t.pendingUrl ?? "",
-    active: t.active,
-    status: t.status,
-    windowId: t.windowId,
-    groupId: t.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE ? null : t.groupId,
+  const list = tabs.map(t => ({
+    tabId: t.id, title: t.title || 'Untitled', url: t.url || '',
   }));
-
-  const list = structured
-    .map((t, i) => `${i + 1}. [${t.id}] ${t.title || "(untitled)"}\n   ${t.url}`)
-    .join("\n");
-
-  const text = `${structured.length} tab(s) in MCP group:\n\n${list}\n\n${JSON.stringify(structured, null, 2)}`;
-
+  let out = `Tab Context:\n- Available tabs:\n`;
+  for (const t of list) out += `  • tabId ${t.tabId}: "${t.title}" (${t.url})\n`;
   return {
-    content: [{ type: "text", text }],
+    content: [{
+      type: 'text',
+      text: JSON.stringify({ availableTabs: list, tabGroupId }) + '\n\n' + out,
+    }],
   };
 }
 
-// Run on module load
-recoverTabGroupState();
+// Fire recovery on module load
+recoveryPromise = recover();
