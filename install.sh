@@ -21,7 +21,7 @@ echo "  │           by orellius.ai              │"
 echo "  └──────────────────────────────────────┘"
 echo -e "${RESET}"
 
-# --- Step 1: Terms of Use ---
+# ── Step 1: Terms of Use (ALWAYS first) ──
 if [ ! -f "$TERMS_FILE" ]; then
   echo -e "${YELLOW}${BOLD}⚖️  TERMS OF USE${RESET}"
   echo ""
@@ -34,56 +34,62 @@ if [ ! -f "$TERMS_FILE" ]; then
   echo "  • Most websites prohibit automated access in their ToS."
   echo "  • This software is provided AS-IS with no warranty."
   echo ""
-  echo "  Full terms: TERMS_OF_USE.md"
+  echo "  Full terms: TERMS_OF_USE.md | README.md"
   echo ""
   echo -e "${BOLD}Type exactly 'I AGREE' to accept and continue:${RESET}"
   read -r consent
   if [ "$consent" != "I AGREE" ]; then
-    echo -e "${RED}Installation cancelled.${RESET}"
+    echo -e "${RED}Installation cancelled. Terms must be accepted.${RESET}"
     exit 1
   fi
   mkdir -p "$CONFIG_DIR"
   date > "$TERMS_FILE"
-  echo -e "${GREEN}Terms accepted.${RESET}"
+  echo -e "${GREEN}✓ Terms accepted.${RESET}"
+  echo ""
+else
+  echo -e "${GREEN}✓ Terms previously accepted.${RESET}"
   echo ""
 fi
 
-# --- Step 2: Extension ID ---
+# ── Step 2: Extension ID ──
 if [ -z "$1" ]; then
   echo -e "${BOLD}Enter your extension ID (from chrome://extensions):${RESET}"
-  read -r EXT_ID
+  echo -e "  Load the extension first: extensions page → Developer mode → Load unpacked → extension/"
+  echo ""
+  read -rp "  Extension ID: " EXT_ID
 else
   EXT_ID="$1"
 fi
 
 if [ -z "$EXT_ID" ] || [ ${#EXT_ID} -ne 32 ]; then
-  echo -e "${RED}Invalid extension ID. Must be 32 characters.${RESET}"
+  echo -e "${RED}Invalid extension ID. Must be exactly 32 characters.${RESET}"
   exit 1
 fi
 
 EXTRA_IDS=("${@:2}")
+echo -e "${GREEN}✓ Extension ID: ${EXT_ID}${RESET}"
+echo ""
 
-# --- Step 3: Build Rust binary ---
-echo -e "${CYAN}Building Rust binary...${RESET}"
+# ── Step 3: Build Rust binary ──
+echo -e "${CYAN}Building Rust binary (release)...${RESET}"
 if ! command -v cargo &>/dev/null; then
-  echo -e "${RED}Rust toolchain not found. Install from https://rustup.rs${RESET}"
+  echo -e "${RED}Rust toolchain not found. Install: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh${RESET}"
   exit 1
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 cargo build --release 2>&1 | tail -3
+echo ""
 
-# --- Step 4: Install binary ---
+# ── Step 4: Install binary ──
 mkdir -p "$INSTALL_DIR"
 cp "target/release/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
 chmod +x "$INSTALL_DIR/$BINARY_NAME"
-echo -e "${GREEN}Binary installed to $INSTALL_DIR/$BINARY_NAME${RESET}"
-
-# --- Step 5: Generate native messaging manifests ---
 BINARY_PATH="$INSTALL_DIR/$BINARY_NAME"
+echo -e "${GREEN}✓ Binary installed: $BINARY_PATH${RESET}"
 
-# Build allowed_origins array
+# ── Step 5: Native messaging manifests ──
 ORIGINS="\"chrome-extension://${EXT_ID}/\""
 for extra in "${EXTRA_IDS[@]}"; do
   ORIGINS="$ORIGINS, \"chrome-extension://${extra}/\""
@@ -125,38 +131,48 @@ else
   install_manifest "$HOME/.config/microsoft-edge/NativeMessagingHosts" "Edge"
 fi
 
-# --- Step 6: Verify ---
+# ── Step 6: Register MCP server with Claude Code ──
 echo ""
-echo -e "${CYAN}Verifying installation...${RESET}"
+echo -e "${CYAN}Registering MCP server with Claude Code...${RESET}"
+
+if command -v claude &>/dev/null; then
+  # Remove existing registration if present (idempotent reinstall)
+  claude mcp remove cli-browser-bridge 2>/dev/null || true
+  claude mcp add cli-browser-bridge -- "$BINARY_PATH" serve 2>&1
+  echo -e "  ${GREEN}✓${RESET} MCP server registered"
+else
+  echo -e "  ${YELLOW}⚠${RESET} Claude Code CLI not found. Register manually:"
+  echo -e "     ${CYAN}claude mcp add cli-browser-bridge -- $BINARY_PATH serve${RESET}"
+fi
+
+# ── Step 7: Verify ──
+echo ""
+echo -e "${CYAN}Verifying...${RESET}"
 
 if "$BINARY_PATH" version &>/dev/null; then
-  echo -e "  ${GREEN}✓${RESET} Binary runs"
+  VER=$("$BINARY_PATH" version 2>/dev/null || echo "unknown")
+  echo -e "  ${GREEN}✓${RESET} Binary: $VER"
 else
   echo -e "  ${RED}✗${RESET} Binary failed to run"
   exit 1
 fi
 
-MANIFEST_OK=true
 for f in "$HOME/Library/Application Support/"*/NativeMessagingHosts/$NATIVE_HOST_NAME.json \
          "$HOME/.config/"*/NativeMessagingHosts/$NATIVE_HOST_NAME.json; do
   [ -f "$f" ] || continue
   if python3 -c "import json; json.load(open('$f'))" 2>/dev/null; then
-    echo -e "  ${GREEN}✓${RESET} Valid manifest: $(basename "$(dirname "$(dirname "$f")")")"
+    echo -e "  ${GREEN}✓${RESET} Manifest: $(basename "$(dirname "$(dirname "$f")")")"
   else
-    echo -e "  ${RED}✗${RESET} Invalid JSON: $f"
-    MANIFEST_OK=false
+    echo -e "  ${RED}✗${RESET} Invalid: $f"
   fi
 done
 
-# --- Step 7: Next steps ---
+# ── Done ──
 echo ""
 echo -e "${BOLD}${GREEN}Installation complete!${RESET}"
 echo ""
-echo "Next steps:"
-echo "  1. Load the extension: chrome://extensions → Developer mode → Load unpacked → extension/"
-echo "  2. Restart your browser (close all windows and reopen)"
-echo "  3. Register with Claude Code:"
+echo "  1. Restart your browser (close all windows, reopen)"
+echo "  2. Start a new Claude Code session"
+echo "  3. Test: \"Navigate to news.ycombinator.com and take a screenshot\""
 echo ""
-echo -e "     ${CYAN}claude mcp add cli-browser-bridge -- $BINARY_PATH serve${RESET}"
-echo ""
-echo "  4. Test: ask Claude to navigate to any website and take a screenshot."
+echo -e "  ${CYAN}Popup:${RESET} click the extension icon to check connectivity status."
