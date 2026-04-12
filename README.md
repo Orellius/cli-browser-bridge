@@ -193,31 +193,85 @@ Claude Code ──[stdio/MCP]──▶ cli-browser-bridge serve ──[UDS]─�
 
 ## Installation
 
-### Prerequisites
+### Option A: Pre-built binaries (recommended)
 
-- **Rust** ([rustup.rs](https://rustup.rs))
-- **Claude Code** ([docs](https://docs.claude.com/claude-code))
-- **Chromium browser** — Chrome, Brave, Edge, or Arc (116+)
+Download the latest binary for your platform from [**Releases**](https://github.com/Orellius/cli-browser-bridge/releases):
 
-### Full install
+| Platform | Binary |
+|---|---|
+| macOS (Apple Silicon) | `cli-browser-bridge-macos-arm64` |
+| macOS (Intel) | `cli-browser-bridge-macos-x64` |
+| Linux (x64) | `cli-browser-bridge-linux-x64` |
+| Windows (x64) | `cli-browser-bridge-windows-x64.exe` |
+
+Then clone the repo for the extension and installer:
 
 ```bash
 git clone https://github.com/Orellius/cli-browser-bridge.git
 cd cli-browser-bridge
 
-# Load extension first:
-# chrome://extensions → Developer mode → Load unpacked → extension/
-# Copy the extension ID
+# Place the downloaded binary in the project root, then:
+# 1. Load extension: chrome://extensions → Developer mode → Load unpacked → extension/
+# 2. Copy the extension ID
+./install.sh <extension-id>
+```
 
+### Option B: Build from source
+
+Requires [Rust toolchain](https://rustup.rs).
+
+```bash
+git clone https://github.com/Orellius/cli-browser-bridge.git
+cd cli-browser-bridge
+
+# Load extension first, copy the ID, then:
 ./install.sh <extension-id>
 
 # For multiple browsers:
 ./install.sh <chrome-id> <brave-id> <edge-id>
 ```
 
-The installer:
+### Windows
+
+```powershell
+# 1. Download cli-browser-bridge-windows-x64.exe from Releases
+# 2. Place in a directory on your PATH (e.g., C:\Users\You\.local\bin\)
+# 3. Load the extension in Chrome/Brave/Edge
+# 4. Create the native messaging manifest manually (see below)
+# 5. Register with Claude Code:
+claude mcp add --scope user cli-browser-bridge -- "C:\path\to\cli-browser-bridge-windows-x64.exe" serve
+```
+
+<details>
+<summary>Windows native messaging manifest</summary>
+
+Save as `com.orellius.browser_bridge.json` in your browser's NativeMessagingHosts directory:
+- Chrome: `%LOCALAPPDATA%\Google\Chrome\User Data\NativeMessagingHosts\`
+- Brave: `%LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data\NativeMessagingHosts\`
+- Edge: `%LOCALAPPDATA%\Microsoft\Edge\User Data\NativeMessagingHosts\`
+
+```json
+{
+  "name": "com.orellius.browser_bridge",
+  "description": "CLI Browser Bridge Native Messaging Host",
+  "path": "C:\\path\\to\\cli-browser-bridge-windows-x64.exe",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://YOUR_EXTENSION_ID/"]
+}
+```
+
+Also create the registry key:
+```
+HKCU\Software\Google\Chrome\NativeMessagingHosts\com.orellius.browser_bridge
+```
+Set the default value to the full path of the JSON manifest.
+
+</details>
+
+### What the installer does
+
 1. Displays terms of use, requires "I AGREE"
-2. Builds the Rust binary
+2. Builds the Rust binary (or uses pre-built)
 3. Installs to `~/.local/bin/cli-browser-bridge`
 4. Registers native messaging manifests for all detected browsers
 5. Registers the MCP server with Claude Code (`--scope user`)
@@ -249,9 +303,10 @@ Start a new Claude Code session:
 cli-browser-bridge/
 ├── src/                    # Rust source (all files <300 lines)
 │   ├── main.rs             # CLI dispatcher
-│   ├── serve.rs            # MCP server + UDS listener
-│   ├── host.rs             # Native messaging + UDS client
-│   ├── config.rs           # Constants
+│   ├── serve.rs            # MCP server + IPC listener
+│   ├── host.rs             # Native messaging + IPC client
+│   ├── ipc.rs              # Platform IPC (UDS on Unix, TCP on Windows)
+│   ├── config.rs           # Constants, platform paths
 │   ├── error.rs            # Typed errors
 │   ├── lifecycle.rs        # PID, socket, signals
 │   ├── native_messaging.rs # Chrome native messaging codec
@@ -260,7 +315,7 @@ cli-browser-bridge/
 │   │   ├── tools.rs        # Core tool schemas
 │   │   └── tools_advanced.rs
 │   └── bridge/
-│       └── protocol.rs     # UDS wire protocol
+│       └── protocol.rs     # IPC wire protocol
 ├── extension/              # Chrome MV3 extension
 │   ├── manifest.json
 │   ├── background.js       # Entry, native messaging, CDP events
@@ -271,9 +326,9 @@ cli-browser-bridge/
 │   ├── content.js          # A11y tree, element refs, Shadow DOM
 │   ├── popup.html/js/css   # Status card
 │   └── icons/
-├── install.sh              # Full installer
+├── .github/workflows/      # CI: cross-platform builds + releases
+├── install.sh              # Full installer (macOS/Linux)
 ├── Cargo.toml
-├── demo.mp4
 └── README.md
 ```
 
@@ -281,11 +336,14 @@ cli-browser-bridge/
 
 ## Platform support
 
-| Platform | Status |
-|---|---|
-| macOS | ✅ Supported |
-| Linux | ✅ Supported |
-| Windows | Not yet — PRs welcome |
+| Platform | Binary | IPC | Status |
+|---|---|---|---|
+| macOS (ARM64) | ✅ Pre-built | Unix socket | Fully supported |
+| macOS (x64) | ✅ Pre-built | Unix socket | Fully supported |
+| Linux (x64) | ✅ Pre-built | Unix socket | Fully supported |
+| Windows (x64) | ✅ Pre-built | TCP localhost | Supported (manual manifest setup) |
+
+Binaries are built automatically via GitHub Actions on every release tag.
 
 ---
 
