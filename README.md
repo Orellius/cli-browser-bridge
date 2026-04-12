@@ -19,16 +19,7 @@
 
 ---
 
-<details>
-<summary><b>📹 Demo — Claude composing a post on X via CLI Browser Bridge</b></summary>
-
-<br>
-
 https://github.com/user-attachments/assets/demo.mp4
-
-<video src="demo.mp4" width="100%" controls></video>
-
-</details>
 
 ---
 
