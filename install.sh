@@ -138,7 +138,7 @@ echo -e "${CYAN}Registering MCP server with Claude Code...${RESET}"
 if command -v claude &>/dev/null; then
   # Remove existing registration if present (idempotent reinstall)
   claude mcp remove cli-browser-bridge 2>/dev/null || true
-  claude mcp add cli-browser-bridge -- "$BINARY_PATH" serve 2>&1
+  claude mcp add --scope user cli-browser-bridge -- "$BINARY_PATH" serve 2>&1
   echo -e "  ${GREEN}✓${RESET} MCP server registered"
 else
   echo -e "  ${YELLOW}⚠${RESET} Claude Code CLI not found. Register manually:"
