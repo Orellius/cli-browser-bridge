@@ -448,8 +448,72 @@
       return true;
     }
 
+    if (msg.type === "scrollToRef") {
+      const el = resolveRef(msg.ref);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+      sendResponse({ result: !!el });
+      return true;
+    }
+
+    if (msg.type === "querySelector") {
+      const el = queryShadowDOM(msg.selector, msg.pierceShadow !== false);
+      if (!el) { sendResponse({ result: null }); return true; }
+      const rect = el.getBoundingClientRect();
+      sendResponse({ result: { visible: rect.width > 0 && rect.height > 0, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } });
+      return true;
+    }
+
+    if (msg.type === "domQuery") {
+      const results = queryAllShadowDOM(msg.selector, msg.pierceShadow !== false, msg.limit || 20);
+      const mapped = results.map((el, i) => {
+        const rect = el.getBoundingClientRect();
+        const ref = `dom_${i}`;
+        const info = { ref, tag: el.tagName.toLowerCase(), text: (el.textContent || "").substring(0, 50).trim(), x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2), w: Math.round(rect.width), h: Math.round(rect.height) };
+        if (msg.includeStyles) {
+          const cs = getComputedStyle(el);
+          info.styles = { display: cs.display, visibility: cs.visibility, opacity: cs.opacity, color: cs.color, fontSize: cs.fontSize };
+        }
+        return info;
+      });
+      sendResponse({ result: mapped });
+      return true;
+    }
+
     return false;
   });
+
+  function queryShadowDOM(selector, pierce) {
+    const el = document.querySelector(selector);
+    if (el || !pierce) return el;
+    const walk = (root) => {
+      for (const node of root.querySelectorAll("*")) {
+        if (node.shadowRoot) {
+          const found = node.shadowRoot.querySelector(selector);
+          if (found) return found;
+          const deep = walk(node.shadowRoot);
+          if (deep) return deep;
+        }
+      }
+      return null;
+    };
+    return walk(document);
+  }
+
+  function queryAllShadowDOM(selector, pierce, limit) {
+    const results = [...document.querySelectorAll(selector)];
+    if (!pierce || results.length >= limit) return results.slice(0, limit);
+    const walk = (root) => {
+      for (const node of root.querySelectorAll("*")) {
+        if (results.length >= limit) return;
+        if (node.shadowRoot) {
+          results.push(...node.shadowRoot.querySelectorAll(selector));
+          walk(node.shadowRoot);
+        }
+      }
+    };
+    walk(document);
+    return results.slice(0, limit);
+  }
 
   // Expose globally for executeScript fallback
   window.__orelliusBrowserBridge = {

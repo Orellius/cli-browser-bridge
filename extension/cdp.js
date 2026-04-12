@@ -1,7 +1,7 @@
-// CDP helpers for CLI Browser Bridge — MV3 service worker context
+// CDP helpers for CLI Browser Bridge
 
-const attachedTabs = new Map(); // tabId -> { enabledDomains: Set }
-const screenshotStore = new Map(); // imageId -> base64
+const attachedTabs = new Map();
+const screenshotStore = new Map();
 const MAX_SCREENSHOTS = 10;
 let screenshotCounter = 0;
 
@@ -15,27 +15,18 @@ export function sleep(ms) {
 export async function ensureAttached(tabId) {
   if (attachedTabs.has(tabId)) return;
 
-  await new Promise((resolve, reject) => {
-    chrome.debugger.attach({ tabId }, '1.3', () => {
-      if (chrome.runtime.lastError) {
-        // Already attached is acceptable
-        if (chrome.runtime.lastError.message?.includes('already attached')) {
-          resolve();
-        } else {
-          reject(new Error(chrome.runtime.lastError.message));
-        }
-      } else {
-        resolve();
-      }
-    });
+  await chrome.debugger.attach({ tabId }, '1.3').catch(e => {
+    if (!e.message?.includes('already attached')) throw e;
   });
 
   attachedTabs.set(tabId, { enabledDomains: new Set() });
 
-  // Force devicePixelRatio=1 so screenshot pixels match CSS coordinate space
+  // Force devicePixelRatio=1 using actual window size (not 0x0)
+  const tab = await chrome.tabs.get(tabId);
+  const win = await chrome.windows.get(tab.windowId);
   await chrome.debugger.sendCommand({ tabId }, 'Emulation.setDeviceMetricsOverride', {
-    width: 0,
-    height: 0,
+    width: win.width || 1280,
+    height: win.height || 800,
     deviceScaleFactor: 1,
     mobile: false,
   });
@@ -56,82 +47,62 @@ export async function cdp(tabId, method, params = {}) {
 
 export async function takeScreenshot(tabId) {
   await ensureAttached(tabId);
-
-  const capture = async (quality) =>
-    chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
-      format: 'jpeg',
-      quality,
-      captureBeyondViewport: false,
-      optimizeForSpeed: true,
+  let result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
+    format: 'jpeg', quality: 55, optimizeForSpeed: true, captureBeyondViewport: false,
+  });
+  if (result.data.length > 500000) {
+    result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
+      format: 'jpeg', quality: 30, optimizeForSpeed: true, captureBeyondViewport: false,
     });
-
-  let result = await capture(55);
-  if (result.data.length > 500 * 1024 * (4 / 3)) {
-    // base64 is ~4/3x raw size; 500KB raw -> ~667KB base64
-    result = await capture(30);
   }
-
-  const base64 = result.data;
   const imageId = `ss_${++screenshotCounter}`;
-
-  screenshotStore.set(imageId, base64);
-
-  // Evict oldest entries beyond MAX_SCREENSHOTS
+  screenshotStore.set(imageId, result.data);
   if (screenshotStore.size > MAX_SCREENSHOTS) {
-    const oldest = screenshotStore.keys().next().value;
-    screenshotStore.delete(oldest);
+    screenshotStore.delete(screenshotStore.keys().next().value);
   }
-
-  return { base64, imageId };
+  return { base64: result.data, imageId };
 }
 
 export async function dispatchMouse(tabId, type, x, y, opts = {}) {
+  // Explicit Number coercion — CDP requires numeric x/y
   await cdp(tabId, 'Input.dispatchMouseEvent', {
     type,
-    x,
-    y,
-    button: opts.button ?? 'left',
-    clickCount: opts.clickCount ?? 1,
-    modifiers: opts.modifiers ?? 0,
-    ...opts.extra,
+    x: Number(x),
+    y: Number(y),
+    button: opts.button || 'left',
+    clickCount: opts.clickCount || 1,
+    modifiers: opts.modifiers || 0,
   });
 }
 
 export async function mouseClick(tabId, x, y, opts = {}) {
-  await dispatchMouse(tabId, 'mouseMoved', x, y, opts);
+  const button = opts.button || 'left';
+  const clickCount = opts.clickCount || 1;
+  const modifiers = opts.modifiers || 0;
+  await dispatchMouse(tabId, 'mouseMoved', x, y, { modifiers });
   await sleep(50);
-  await dispatchMouse(tabId, 'mousePressed', x, y, opts);
+  await dispatchMouse(tabId, 'mousePressed', x, y, { button, clickCount, modifiers });
   await sleep(50);
-  await dispatchMouse(tabId, 'mouseReleased', x, y, opts);
+  await dispatchMouse(tabId, 'mouseReleased', x, y, { button, clickCount, modifiers });
 }
 
 export async function humanType(tabId, text) {
   await ensureAttached(tabId);
-
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
-
     await chrome.debugger.sendCommand({ tabId }, 'Input.insertText', { text: ch });
-
     const isSpace = ch === ' ' || ch === '\n';
-    const delay = isSpace
-      ? 200 + Math.random() * 200   // 200-400ms pause between words
-      : 40 + Math.random() * 140;   // 40-180ms between characters
-
+    const delay = isSpace ? 200 + Math.random() * 200 : 40 + Math.random() * 140;
     await sleep(delay);
   }
 }
 
-// Cleanup: tab closed
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (!attachedTabs.has(tabId)) return;
   attachedTabs.delete(tabId);
-  chrome.debugger.detach({ tabId }, () => {
-    void chrome.runtime.lastError; // suppress "not attached" errors
-  });
+  try { chrome.debugger.detach({ tabId }); } catch {}
 });
 
-// Cleanup: debugger detached externally (DevTools opened, etc.)
 chrome.debugger.onDetach.addListener(({ tabId }) => {
   attachedTabs.delete(tabId);
 });

@@ -94,14 +94,16 @@ async function navigate(args) {
 
 async function computer(args) {
   const { tabId, action } = args;
-  const coord = args.coordinate;
+  const coord = Array.isArray(args.coordinate) ? args.coordinate : null;
   const modifiers = parseModifiers(args.modifiers);
 
-  let cx = coord?.[0], cy = coord?.[1];
-  if (args.ref && !coord) {
+  let cx = coord ? Number(coord[0]) : undefined;
+  let cy = coord ? Number(coord[1]) : undefined;
+  if (args.ref && cx == null) {
     const resolved = await resolveRef(tabId, args.ref);
     if (!resolved) return err(`Could not resolve ref "${args.ref}"`);
-    [cx, cy] = resolved;
+    cx = Number(resolved[0]);
+    cy = Number(resolved[1]);
   }
 
   switch (action) {
@@ -131,9 +133,10 @@ async function computer(args) {
       return text(`Typed "${args.text.substring(0, 50)}${args.text.length > 50 ? '...' : ''}"`);
     }
     case 'key': {
-      if (!args.text) return err('text required for key action');
+      const keyText = args.text || args.key || '';
+      if (!keyText) return err('text required for key action');
       const repeat = Math.min(args.repeat || 1, 100);
-      const keys = args.text.split(' ').filter(Boolean);
+      const keys = String(keyText).split(' ').filter(Boolean);
       for (let r = 0; r < repeat; r++) {
         for (const k of keys) {
           const { key, modifiers: km } = parseKeyCombo(k);
