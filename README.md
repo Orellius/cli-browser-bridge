@@ -12,7 +12,7 @@
 <p align="center">
   <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-black">
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.70+-orange">
-  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue">
   <img alt="MV3" src="https://img.shields.io/badge/manifest-v3-orange">
   <img alt="MCP" src="https://img.shields.io/badge/MCP-compatible-purple">
 </p>
@@ -23,11 +23,11 @@ https://github.com/user-attachments/assets/51043900-c95b-43b9-999c-f856ad752e20
 
 ---
 
-CLI Browser Bridge gives [Claude Code](https://claude.ai/code) an MCP-powered bridge into your real, signed-in Chromium browser — with **no domain blocklist**. Claude can navigate, click, type, screenshot, query Shadow DOM, and run JavaScript on any URL. Reddit, X, Discord, paywalled docs, SSO dashboards — all fair game.
+CLI Browser Bridge gives [Claude Code](https://claude.ai/code) an MCP-powered bridge into your real, signed-in Chromium browser — with **no domain blocklist**. Claude can navigate, click, type, screenshot, query Shadow DOM, and run JavaScript on any URL. Reddit, X, Discord, docs, SSO dashboards — all fair game.
 
 **v2.0** is a ground-up Rust rebuild. Single compiled binary, no Node.js, no shell wrappers. Direct native messaging — Chrome launches the binary, it just works.
 
-Works with **Chrome**, **Brave**, **Edge**, and **Arc** on **macOS** and **Linux**.
+Works with **Chrome**, **Brave**, **Edge**, and **Arc** on **macOS** and **Linux** and **Windows**.
 
 > **Disclaimer — not affiliated with Claude Code.** This is a fan-made, unofficial community project. It is not endorsed by or connected to Claude Code in any way.
 
